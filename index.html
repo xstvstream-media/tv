@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NEXUS | Encurtador de Links</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-
     <style>
         :root {
             --bg-color: #0b0b0b;
@@ -282,7 +281,7 @@
         <h2 id="redirectMsg" style="font-weight: 500; font-size: 1.1rem;">Redirecionando...</h2>
     </div>
 
-    <!-- Interface Principal -->
+    <!-- Interface Principal do Usuário -->
     <div class="container" id="mainContainer">
         <header>
             <h1>NEXUS<span>Links</span></h1>
@@ -302,7 +301,7 @@
                         <span class="prefix" id="domainPrefix">.../?l=</span>
                         <input type="text" id="customAlias" placeholder="meu-nome">
                     </div>
-                    <div id="errorMsg" class="msg-erro">Este nome personalizado já está em uso!</div>
+                    <div id="errorMsg" class="msg-erro">Este nome personalizado já está em uso ou foi bloqueado!</div>
                 </div>
 
                 <button type="submit" class="btn-primary" id="btnSubmit">Encurtar Link</button>
@@ -318,21 +317,26 @@
         </div>
 
         <div class="history">
-            <h3>Links Criados Recentemente.</h3>
+            <h3>Seus Links Recentes</h3>
             <ul class="history-list" id="historyList">
-                <p style="color: var(--text-muted); font-size: 0.85rem;">Carregando links...</p>
+                <p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda por você neste navegador.</p>
             </ul>
         </div>
     </div>
 
     <script>
-        // Endereço exato do seu banco de dados no Firebase
         const DB_URL = "https://meu-encurtador-e5878-default-rtdb.firebaseio.com";
-
         const currentDomain = window.location.origin + window.location.pathname;
         document.getElementById('domainPrefix').textContent = window.location.hostname + '/?l=';
 
-        // LÓGICA DE REDIRECIONAMENTO AUTOMÁTICO
+        // Identificador local do dispositivo do usuário (para registrar quem criou)
+        let localUserId = localStorage.getItem('nexus_user_id');
+        if (!localUserId) {
+            localUserId = 'user_' + Math.random().toString(36).substring(2, 10);
+            localStorage.setItem('nexus_user_id', localUserId);
+        }
+
+        // REDIRECIONAMENTO
         const urlParams = new URLSearchParams(window.location.search);
         const aliasParam = urlParams.get('l');
 
@@ -343,8 +347,17 @@
             fetch(`${DB_URL}/links/${aliasParam.toLowerCase()}.json`)
                 .then(res => res.ok ? res.json() : null)
                 .then(data => {
-                    if (data && data.originalUrl) {
+                    if (data && data.originalUrl && !data.blocked) {
+                        // Incrementa cliques se o link for válido
+                        const clicks = (data.clicks || 0) + 1;
+                        fetch(`${DB_URL}/links/${aliasParam.toLowerCase()}/clicks.json`, {
+                            method: 'PUT',
+                            body: JSON.stringify(clicks)
+                        });
                         window.location.href = data.originalUrl;
+                    } else if (data && data.blocked) {
+                        document.querySelector('.spinner').style.display = 'none';
+                        document.getElementById('redirectMsg').textContent = 'Este link foi suspenso por violar os termos de uso.';
                     } else {
                         document.querySelector('.spinner').style.display = 'none';
                         document.getElementById('redirectMsg').textContent = 'Link não encontrado!';
@@ -356,7 +369,7 @@
                 });
         }
 
-        // LÓGICA DE CRIAR NOVO LINK
+        // ENCURTAR LINK
         document.getElementById('shortenForm').addEventListener('submit', async function(e) {
             e.preventDefault();
             
@@ -374,7 +387,6 @@
             }
 
             try {
-                // Checa se o apelido já existe
                 const checkRes = await fetch(`${DB_URL}/links/${customAlias}.json`);
                 if (checkRes.ok) {
                     const existing = await checkRes.json();
@@ -388,20 +400,26 @@
 
                 const finalShortUrl = currentDomain + '?l=' + customAlias;
 
-                // Salva no Realtime Database
+                // Salva informações completas para o Administrador analisar
                 const saveRes = await fetch(`${DB_URL}/links/${customAlias}.json`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         originalUrl: longUrl,
-                        createdAt: Date.now()
+                        createdAt: Date.now(),
+                        userId: localUserId,
+                        clicks: 0,
+                        blocked: false
                     })
                 });
 
                 if (!saveRes.ok) {
-                    alert('Erro ao salvar no banco. Verifique as permissões/regras no Firebase.');
+                    alert('Erro ao salvar o link.');
                     return;
                 }
+
+                // Salva localmente para exibir histórico PRIVADO ao usuário
+                saveToLocalHistory(customAlias, longUrl);
 
                 const shortDisplay = document.getElementById('shortUrlDisplay');
                 shortDisplay.textContent = finalShortUrl;
@@ -410,7 +428,7 @@
 
                 document.getElementById('longUrl').value = '';
                 document.getElementById('customAlias').value = '';
-                loadHistory();
+                loadLocalHistory();
 
             } catch (err) {
                 alert('Erro de conexão ao tentar salvar o link.');
@@ -429,56 +447,39 @@
             });
         }
 
-        async function loadHistory() {
-            const historyList = document.getElementById('historyList');
-            
-            try {
-                const res = await fetch(`${DB_URL}/links.json`);
-                if (!res.ok) {
-                    historyList.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda.</p>';
-                    return;
-                }
-                const data = await res.json();
-                
-                historyList.innerHTML = '';
-                if (!data) {
-                    historyList.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda.</p>';
-                    return;
-                }
-
-                const items = Object.keys(data)
-                    .filter(key => data[key] && data[key].originalUrl)
-                    .map(key => ({
-                        alias: key,
-                        ...data[key]
-                    }))
-                    .slice(-5)
-                    .reverse();
-
-                if (items.length === 0) {
-                    historyList.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda.</p>';
-                    return;
-                }
-
-                items.forEach(item => {
-                    const fullShort = currentDomain + '?l=' + item.alias;
-                    const li = document.createElement('li');
-                    li.className = 'history-item';
-                    li.innerHTML = `
-                        <div class="history-details">
-                            <a href="${fullShort}" target="_blank" class="history-short">${fullShort}</a>
-                            <span class="history-long">${item.originalUrl}</span>
-                        </div>
-                        <button class="btn-copy" style="border-color: var(--border); color: var(--text-muted);" onclick="navigator.clipboard.writeText('${fullShort}')">Copiar</button>
-                    `;
-                    historyList.appendChild(li);
-                });
-            } catch (err) {
-                historyList.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda.</p>';
-            }
+        function saveToLocalHistory(alias, originalUrl) {
+            let userLinks = JSON.parse(localStorage.getItem('nexus_my_links') || '[]');
+            userLinks.unshift({ alias, originalUrl });
+            userLinks = userLinks.slice(0, 5); // guarda os 5 últimos
+            localStorage.setItem('nexus_my_links', JSON.stringify(userLinks));
         }
 
-        loadHistory();
+        function loadLocalHistory() {
+            const historyList = document.getElementById('historyList');
+            const userLinks = JSON.parse(localStorage.getItem('nexus_my_links') || '[]');
+
+            if (userLinks.length === 0) {
+                historyList.innerHTML = '<p style="color: var(--text-muted); font-size: 0.85rem;">Nenhum link criado ainda por você neste navegador.</p>';
+                return;
+            }
+
+            historyList.innerHTML = '';
+            userLinks.forEach(item => {
+                const fullShort = currentDomain + '?l=' + item.alias;
+                const li = document.createElement('li');
+                li.className = 'history-item';
+                li.innerHTML = `
+                    <div class="history-details">
+                        <a href="${fullShort}" target="_blank" class="history-short">${fullShort}</a>
+                        <span class="history-long">${item.originalUrl}</span>
+                    </div>
+                    <button class="btn-copy" style="border-color: var(--border); color: var(--text-muted);" onclick="navigator.clipboard.writeText('${fullShort}')">Copiar</button>
+                `;
+                historyList.appendChild(li);
+            });
+        }
+
+        loadLocalHistory();
     </script>
 </body>
 </html>
